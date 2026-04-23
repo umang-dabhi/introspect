@@ -367,22 +367,80 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
         for tool in s["tool_uses"]:
             tool_counter[tool] += 1
 
-    # Session completion signals
+    # ─── Smart Completion Detection ────────────────────────────────────
+    # Categories:
+    #   completed  — clear wrap-up signals (thanks, done, commit, ship)
+    #   paused     — natural stop (end of day, long gap before next session, low frustration)
+    #   continued  — same project session starts shortly after this one ended
+    #   abandoned  — high frustration, mid-task stop, no follow-up
     completion_count = 0
+    paused_count = 0
+    continued_count = 0
     abandoned_count = 0
+
     completion_signals = ["done", "thanks", "perfect", "great", "commit", "push",
                           "ship it", "looks good", "working", "passed", "merged",
-                          "nice", "awesome", "sahi hai", "badhiya", "thank"]
-    for s in sessions:
+                          "nice", "awesome", "sahi hai", "badhiya", "thank",
+                          "lgtm", "approved", "shipped", "deployed", "fixed"]
+
+    # Sort sessions by timestamp for continuity detection
+    sorted_sessions = sorted(sessions, key=lambda x: x.get("first_timestamp") or "")
+
+    for idx, s in enumerate(sorted_sessions):
         if not s["user_messages"]:
             abandoned_count += 1
             continue
+
         last_msgs = s["user_messages"][-3:]
         has_completion = any(contains_signal(m["text"], completion_signals) for m in last_msgs)
+
         if has_completion:
             completion_count += 1
-        else:
-            abandoned_count += 1
+            continue
+
+        # Check if next session is same project within 2 hours → "continued"
+        is_continued = False
+        if idx + 1 < len(sorted_sessions) and s.get("last_timestamp") and sorted_sessions[idx + 1].get("first_timestamp"):
+            try:
+                end_time = datetime.fromisoformat(s["last_timestamp"])
+                next_start = datetime.fromisoformat(sorted_sessions[idx + 1]["first_timestamp"])
+                gap_minutes = (next_start - end_time).total_seconds() / 60
+                same_project = s["project"] == sorted_sessions[idx + 1]["project"]
+                if same_project and 0 < gap_minutes < 120:
+                    is_continued = True
+            except (ValueError, TypeError):
+                pass
+
+        if is_continued:
+            continued_count += 1
+            continue
+
+        # Check for natural pause signals:
+        # - Session ended in evening/night (likely end of day)
+        # - Low frustration in last few messages
+        # - Reasonable session length (not a 2-message abandon)
+        is_natural_pause = False
+        if s.get("last_timestamp"):
+            try:
+                end_dt = datetime.fromisoformat(s["last_timestamp"])
+                end_hour = end_dt.hour
+                # End of day (after 6pm or before 8am) = natural pause
+                if end_hour >= 18 or end_hour < 8:
+                    is_natural_pause = True
+            except (ValueError, TypeError):
+                pass
+
+        # Also natural if session had decent length and low frustration at end
+        last_frustrations = sum(1 for m in last_msgs if contains_signal(m["text"], FRUSTRATION_SIGNALS))
+        if s["turn_count"] >= 5 and last_frustrations == 0:
+            is_natural_pause = True
+
+        if is_natural_pause:
+            paused_count += 1
+            continue
+
+        # Everything else = abandoned (mid-task, high frustration, or very short)
+        abandoned_count += 1
 
     # Repeated prompts (similar consecutive messages)
     repeated_prompts = 0
@@ -455,8 +513,12 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
         },
         "completion": {
             "completed": completion_count,
+            "paused": paused_count,
+            "continued": continued_count,
             "abandoned": abandoned_count,
             "completion_rate": round(completion_count / max(len(sessions), 1) * 100, 1),
+            "healthy_rate": round((completion_count + paused_count + continued_count) / max(len(sessions), 1) * 100, 1),
+            "true_abandon_rate": round(abandoned_count / max(len(sessions), 1) * 100, 1),
         },
     }
 
@@ -769,14 +831,291 @@ def compute_scope_analysis(sessions: list[dict]) -> list[dict]:
 
 
 def format_project_name(raw: str) -> str:
-    """Clean up project directory name for display."""
+    """Clean up project directory name for display.
+
+    Dynamically detects home directory components instead of hardcoding usernames.
+    Handles paths encoded as dash-separated segments (Claude project dir format).
+    """
+    home_dir = str(Path.home())
+    # Build a set of path components to skip (from actual home dir)
+    # e.g., /home/john/Documents/Projects → {"home", "john", "Documents", "Projects"}
+    skip_parts = set()
+    for component in Path(home_dir).parts:
+        skip_parts.add(component.strip("/"))
+
+    # Common directory names that aren't meaningful project identifiers
+    skip_parts.update({
+        "", "Documents", "Projects", "projects", "repos", "Repos",
+        "workspace", "Workspace", "dev", "Dev", "code", "Code",
+        "src", "Source", "github", "GitHub", "gitlab", "GitLab",
+        "work", "Work", "personal", "Personal", "Desktop", "Downloads",
+    })
+
+    # Also try to detect and skip the username-level directory
+    # (e.g., "Umang" in /home/tops/Documents/Umang/Projects/)
+    # Heuristic: if a part appears right after a common parent dir, skip it
+    # We check: is there a path like ~/Documents/<Name>/Projects? If so, <Name> is a user dir.
+    common_parents = {"Documents", "Desktop", "repos", "code", "dev", "work"}
+    for parent in common_parents:
+        candidate_dir = Path(home_dir) / parent
+        if candidate_dir.exists():
+            for child in candidate_dir.iterdir():
+                if child.is_dir() and (child / "Projects").is_dir():
+                    skip_parts.add(child.name)
+                if child.is_dir() and (child / "projects").is_dir():
+                    skip_parts.add(child.name)
+
     parts = raw.split("-")
     meaningful = []
+    # Track if we're still in the "path prefix" zone (skip until we hit meaningful parts)
+    found_meaningful = False
     for p in parts:
-        if p in ("home", "tops", "Documents", "Umang", "Projects", ""):
+        if p in skip_parts:
             continue
+        # Skip single-char fragments that are likely path artifacts
+        if len(p) <= 1 and not found_meaningful:
+            continue
+        found_meaningful = True
         meaningful.append(p)
     return "/".join(meaningful) if meaningful else raw
+
+
+# ─── Dreyfus Skill Model & Archetype Tier Data ──────────────────────────────
+
+DREYFUS_LEVELS = [
+    {"name": "Novice", "emoji": "🌱", "grade_range": "D (0-39)", "description": "Follows rules rigidly, needs step-by-step guidance"},
+    {"name": "Advanced Beginner", "emoji": "🌿", "grade_range": "C (40-59)", "description": "Recognizes patterns, still needs structure"},
+    {"name": "Competent", "emoji": "🌳", "grade_range": "B (60-74)", "description": "Plans, prioritizes, handles complexity"},
+    {"name": "Proficient", "emoji": "🏔️", "grade_range": "A (75-89)", "description": "Sees the big picture, intuitive decisions"},
+    {"name": "Expert", "emoji": "⭐", "grade_range": "S (90-100)", "description": "Fluid, automatic, creates reusable patterns"},
+]
+
+ARCHETYPE_TIERS = {
+    "S": {
+        "archetypes": ["The Sniper", "The Architect"],
+        "description": "Elite — precise, structured, minimal waste"
+    },
+    "A": {
+        "archetypes": ["The Scientist", "The Director", "The Phoenix"],
+        "description": "Strong — effective collaboration, clear strengths"
+    },
+    "B": {
+        "archetypes": ["The Sprinter", "The Philosopher"],
+        "description": "Solid — gets it done, specific growth areas"
+    },
+    "C": {
+        "archetypes": ["The Hacker", "The Bulldozer"],
+        "description": "Developing — high output but costly process"
+    },
+    "D": {
+        "archetypes": ["The Explorer"],
+        "description": "Starting — still finding their style"
+    },
+}
+
+ARCHETYPE_EVOLUTION_PATHS = {
+    "The Explorer": {
+        "current_tier": "D",
+        "next_target": "The Sprinter",
+        "generic_tips": [
+            "Set ONE clear goal per session — write it as your first message",
+            "Time-box sessions to 30 minutes max until you find your rhythm",
+            "After each session, note what worked and what didn't (even mentally)"
+        ]
+    },
+    "The Bulldozer": {
+        "current_tier": "C",
+        "next_target": "The Phoenix",
+        "generic_tips": [
+            "On retry #3 for the same thing — STOP. Ask 'why is this failing?' before trying again",
+            "When frustrated, change APPROACH not just WORDING — try a different strategy entirely",
+            "Keep a mental count of retries — if you hit 5 on one task, pause and re-scope"
+        ]
+    },
+    "The Hacker": {
+        "current_tier": "C",
+        "next_target": "The Sprinter",
+        "generic_tips": [
+            "Before executing, spend 30 seconds planning — even a mental checklist helps",
+            "End every session with a clean wrap-up: what was done, what's next",
+            "Batch related changes instead of rapid-fire single edits"
+        ]
+    },
+    "The Sprinter": {
+        "current_tier": "B",
+        "next_target": "The Sniper",
+        "generic_tips": [
+            "Front-load context in your first message — spend 60 extra seconds writing a richer prompt",
+            "For complex tasks, resist the urge to 'just start' — a 3-line plan saves 10 turns",
+            "Verify critical changes even when speed feels more important"
+        ]
+    },
+    "The Philosopher": {
+        "current_tier": "B",
+        "next_target": "The Scientist",
+        "generic_tips": [
+            "Pair every deep discussion with a concrete action — 'let's discuss X, then implement Y'",
+            "Time-box philosophical exploration: 5 turns max, then shift to execution",
+            "Add verification checkpoints — after discussing, test the conclusion"
+        ]
+    },
+    "The Scientist": {
+        "current_tier": "A",
+        "next_target": "The Architect",
+        "generic_tips": [
+            "You verify well — now plan BEFORE execution. Write a 3-step plan as first message",
+            "Scale verification to complexity — quick checks for simple tasks, deep for complex",
+            "Start structuring prompts with explicit expected outcomes"
+        ]
+    },
+    "The Director": {
+        "current_tier": "A",
+        "next_target": "The Architect",
+        "generic_tips": [
+            "You delegate well — add structure by scoping sessions to 1 deliverable",
+            "End sessions with explicit summaries — 'done: X, pending: Y, next: Z'",
+            "Before delegating, write a brief spec — even 3 lines reduces iterations"
+        ]
+    },
+    "The Phoenix": {
+        "current_tier": "A",
+        "next_target": "The Scientist",
+        "generic_tips": [
+            "Your resilience is rare — add systematic verification to complement your adaptability",
+            "After recovering from a failure, pause to understand WHY it failed (not just fix it)",
+            "Document your recovery strategies — they're reusable patterns"
+        ]
+    },
+    "The Architect": {
+        "current_tier": "S",
+        "next_target": "The Sniper",
+        "generic_tips": [
+            "You plan well — now compress. Turn multi-step plans into precise single prompts",
+            "Trust your structure enough to skip scaffolding on familiar tasks",
+            "Optimize for fewer turns without losing clarity — aim for first-prompt resolution"
+        ]
+    },
+    "The Sniper": {
+        "current_tier": "S",
+        "next_target": None,
+        "generic_tips": [
+            "You're at the top — focus on consistency across ALL task types",
+            "Share your prompting patterns with others — teaching deepens mastery",
+            "Experiment with Claude's newer capabilities to expand your toolset"
+        ]
+    },
+}
+
+
+def compute_dreyfus_and_tiers(raw_metrics: dict) -> dict:
+    """Compute Dreyfus skill level mapping and archetype tier data.
+
+    This provides the RAW data — Claude (via SKILL.md) does the interpretation,
+    personalized tips (75-85%), and evolution path narrative.
+    """
+
+    # Map metric areas to approximate scores for Dreyfus placement
+    # These are heuristic — Claude will refine with actual session analysis
+    param_scores = {}
+
+    totals = raw_metrics["totals"]
+    per_session = raw_metrics["per_session"]
+    prompts = raw_metrics["prompt_distribution"]
+    signals = raw_metrics["signals"]
+    tools = raw_metrics["tool_usage"]
+    completion = raw_metrics["completion"]
+    comms = raw_metrics["communication_style"]
+
+    total_msgs = max(totals["user_messages"], 1)
+    total_sessions = max(totals["sessions"], 1)
+
+    # Clarity score
+    detail_ratio = (prompts["long_200_500"] + prompts["mega_over_500"]) / max(prompts["total"], 1) * 100
+    vague_ratio = prompts["short_under_30"] / max(prompts["total"], 1) * 100
+    param_scores["clarity"] = min(100, max(0, int(50 + detail_ratio * 0.4 - vague_ratio * 0.3)))
+
+    # Iteration efficiency
+    avg_turns = per_session["avg_turns"]
+    if avg_turns <= 5: param_scores["iteration"] = 90
+    elif avg_turns <= 10: param_scores["iteration"] = 80
+    elif avg_turns <= 20: param_scores["iteration"] = 65
+    elif avg_turns <= 40: param_scores["iteration"] = 50
+    else: param_scores["iteration"] = 35
+
+    # Tool leverage
+    tool_rate = tools["sessions_with_tools"] / total_sessions * 100
+    diversity_bonus = min(20, tools["unique_tools"] * 3)
+    param_scores["tool_leverage"] = min(100, int(40 + tool_rate * 0.4 + diversity_bonus))
+
+    # Verification
+    verify_rate = signals["verification"] / total_msgs * 100
+    if verify_rate > 30: param_scores["verification"] = 90
+    elif verify_rate > 20: param_scores["verification"] = 85
+    elif verify_rate > 10: param_scores["verification"] = 70
+    elif verify_rate > 5: param_scores["verification"] = 55
+    else: param_scores["verification"] = 35
+
+    # Engagement
+    engage_rate = signals["engagement"] / total_msgs * 100
+    blind_rate = signals["blind_agreement"] / total_msgs * 100
+    param_scores["engagement"] = min(100, max(0, int(50 + engage_rate * 1.5 - blind_rate * 0.8)))
+
+    # Frustration recovery
+    frust_rate = signals["frustration"] / total_msgs * 100
+    repeat_rate = signals["repeated_prompts"] / total_msgs * 100
+    param_scores["frustration_recovery"] = min(100, max(0, int(85 - frust_rate * 2 - repeat_rate * 3)))
+
+    # Momentum (using healthy_rate instead of old completion_rate)
+    param_scores["momentum"] = min(100, int(completion["healthy_rate"]))
+
+    # Token efficiency
+    tpt = per_session["tokens_per_turn"]
+    if tpt < 5000: param_scores["token_efficiency"] = 90
+    elif tpt < 15000: param_scores["token_efficiency"] = 80
+    elif tpt < 30000: param_scores["token_efficiency"] = 65
+    elif tpt < 60000: param_scores["token_efficiency"] = 50
+    else: param_scores["token_efficiency"] = 35
+
+    # Decomposition
+    mega_ratio = prompts["mega_over_500"] / max(prompts["total"], 1)
+    struct_ratio = prompts["structured"] / max(prompts["total"], 1)
+    param_scores["decomposition"] = min(100, max(0, int(70 - mega_ratio * 50 + struct_ratio * 40)))
+
+    # Map scores to Dreyfus levels
+    def score_to_dreyfus(score: int) -> dict:
+        if score >= 90: level_idx = 4  # Expert
+        elif score >= 75: level_idx = 3  # Proficient
+        elif score >= 60: level_idx = 2  # Competent
+        elif score >= 40: level_idx = 1  # Advanced Beginner
+        else: level_idx = 0  # Novice
+        return {
+            "score": score,
+            "level": DREYFUS_LEVELS[level_idx]["name"],
+            "emoji": DREYFUS_LEVELS[level_idx]["emoji"],
+            "level_index": level_idx,
+            "next_level": DREYFUS_LEVELS[level_idx + 1]["name"] if level_idx < 4 else None,
+        }
+
+    dreyfus_map = {param: score_to_dreyfus(score) for param, score in param_scores.items()}
+
+    # Overall score
+    weights = {
+        "clarity": 1.5, "iteration": 1.2, "decomposition": 1.0,
+        "momentum": 1.3, "tool_leverage": 0.8, "frustration_recovery": 1.0,
+        "verification": 1.2, "engagement": 1.0, "token_efficiency": 0.8,
+    }
+    total_weight = sum(weights.values())
+    overall_score = int(sum(param_scores.get(k, 50) * w for k, w in weights.items()) / total_weight)
+
+    return {
+        "param_scores": param_scores,
+        "dreyfus_map": dreyfus_map,
+        "dreyfus_levels_reference": DREYFUS_LEVELS,
+        "overall_score": overall_score,
+        "overall_dreyfus": score_to_dreyfus(overall_score),
+        "archetype_tiers": ARCHETYPE_TIERS,
+        "evolution_paths": ARCHETYPE_EVOLUTION_PATHS,
+    }
 
 
 # ─── Main Output ─────────────────────────────────────────────────────────────
@@ -830,6 +1169,9 @@ def main():
     snippets = extract_session_snippets(parsed, max_snippets=8)
     scope = compute_scope_analysis(parsed)
 
+    # Dreyfus & tier analysis
+    dreyfus_data = compute_dreyfus_and_tiers(raw_metrics)
+
     # Project distribution
     project_counts = Counter(format_project_name(s["project"]) for s in parsed)
 
@@ -846,6 +1188,7 @@ def main():
             },
         },
         "raw_metrics": raw_metrics,
+        "dreyfus_and_tiers": dreyfus_data,
         "chrono_analysis": chrono,
         "context_switching": context_switching,
         "session_journeys": journeys,

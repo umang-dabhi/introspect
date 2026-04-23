@@ -200,13 +200,94 @@ Write the full report as a markdown file. Save it to:
 ## 📊 Parameter Scorecard
 [table with ALL 13 params — grade, score, and YOUR interpretation]
 
+## 🧬 Dreyfus Skill Ladder
+
+The JSON contains `dreyfus_and_tiers` with per-parameter Dreyfus levels (Novice → Advanced Beginner → Competent → Proficient → Expert).
+
+Present this as a visual skill ladder for EACH parameter:
+
+```
+🎯 Clarity:             🌱 → 🌿 → [🌳] → 🏔️ → ⭐    Competent (next: Proficient)
+🔄 Iteration:           🌱 → 🌿 → 🌳 → [🏔️] → ⭐    Proficient (next: Expert)
+🛠️ Tool Leverage:       🌱 → 🌿 → 🌳 → 🏔️ → [⭐]    Expert ✨
+😤 Frustration Recovery: [🌱] → 🌿 → 🌳 → 🏔️ → ⭐    Novice (next: Adv. Beginner)
+...
+```
+
+Highlight:
+- **Strongest param** (highest Dreyfus level) → celebrate it
+- **Weakest param** (lowest Dreyfus level) → this is the growth priority
+- **Overall Dreyfus level** from the data
+
+Dreyfus levels reference (from the JSON):
+| Level | Grade Range | Description |
+|-------|------------|-------------|
+| 🌱 Novice | D (0-39) | Follows rules rigidly, needs step-by-step guidance |
+| 🌿 Advanced Beginner | C (40-59) | Recognizes patterns, still needs structure |
+| 🌳 Competent | B (60-74) | Plans, prioritizes, handles complexity |
+| 🏔️ Proficient | A (75-89) | Sees the big picture, intuitive decisions |
+| ⭐ Expert | S (90-100) | Fluid, automatic, creates reusable patterns |
+
 ## 🎭 Your Archetype
+
 ### Primary: [Archetype]
 [2-3 sentences with evidence]
 ### Secondary: [Archetype]
 [1-2 sentences]
 ### 🌑 Shadow (Under Stress): [Archetype]
 [2-3 sentences about stress behavior — THIS is the psychology]
+
+### 🏆 Archetype Tier Placement
+
+Show where the user's primary archetype sits in the tier ranking:
+
+```
+TIER S (Elite):       🎯 Sniper    🎨 Architect
+TIER A (Strong):      🧪 Scientist  🎭 Director  🔥 Phoenix
+TIER B (Solid):       🏃 Sprinter   🧘 Philosopher
+TIER C (Developing):  ⚡ Hacker     🚜 Bulldozer
+TIER D (Starting):    🌀 Explorer
+
+  ← YOU ARE HERE: [Tier X] — [Archetype Name]
+```
+
+The `archetype_tiers` data in the JSON has the full tier mapping.
+
+## 🚀 How to Level Up — Your Evolution Path
+
+**THIS IS THE MOST IMPORTANT SECTION. 75-85% personalized, 15-25% generic framework.**
+
+The JSON contains `evolution_paths` with generic tips per archetype. Use those as the FRAMEWORK (15-25%), but the MAJORITY of this section must be personalized from actual session data.
+
+### Structure:
+
+#### Current → Target
+```
+[Current Archetype] (Tier X) → [Target Archetype] (Tier Y)
+```
+
+#### Generic Evolution Roadmap (15-25%)
+Pull from `evolution_paths` in the JSON. Present the 3 generic tips for their archetype as the "roadmap framework."
+
+#### Personalized Level-Up Tips (75-85%)
+THIS IS WHERE YOU EARN YOUR PAY. Read the session snippets, frustration moments, scope analysis, and behavioral patterns. Write 3-5 SPECIFIC tips that are:
+
+- **Evidence-based** — cite specific session behavior you observed
+  - "In session `abc123`, you retried the same prompt 4 times before changing approach. Next time, change strategy after retry #2."
+- **Actionable THIS WEEK** — not vague advice, concrete behavior changes
+  - "Before your next TELEPORT session, write a 1-line scope statement as your first message: 'This session: [specific goal] only'"
+- **Tied to the archetype transition** — each tip should move them TOWARD the target archetype
+  - "Directors become Architects by adding structure. Try ending your next 3 sessions with: 'Done: X. Next: Y.'"
+- **Include a "micro-challenge"** — one tiny habit to try
+  - "🎯 Micro-challenge: For the next 5 sessions, set a 'scope alarm' — if you say 'also' or 'one more thing' more than twice, split the session."
+
+#### What Leveling Up Looks Like
+Describe concretely what changes when they reach the next tier:
+- Fewer turns per task
+- Higher completion rate
+- Less frustration
+- More first-prompt resolution
+- Specific metrics that would improve
 
 ## 🧬 Behavioral Patterns
 ### Patterns Detected:
@@ -226,14 +307,25 @@ Write the full report as a markdown file. Save it to:
 ## 📐 Scope & Focus
 [context switching score + scope discipline findings]
 
+**Completion Breakdown (new categories):**
+The JSON now provides smarter completion detection:
+- ✅ **Completed** — clear wrap-up signals (thanks, done, ship it)
+- ⏸️ **Paused** — natural stop (end of day, low frustration, decent session length)
+- 🔄 **Continued** — same project session starts shortly after (user just split work)
+- ❌ **Abandoned** — high frustration mid-task, very short, no follow-up
+
+Use `healthy_rate` (completed + paused + continued) instead of raw completion_rate for the Momentum score. `true_abandon_rate` is the real concern metric.
+
+Present this breakdown in the report — it's much fairer than the old binary "completed vs abandoned."
+
 ## 🌱 Growth Areas
-[2-3 specific, actionable tips tied to actual data]
+[2-3 specific, actionable tips tied to actual data — these should COMPLEMENT the Level Up section, not duplicate it. Focus on the weakest 2-3 PARAMETERS here, while Level Up focuses on ARCHETYPE evolution.]
 
 ## 🎲 Fun Stats
 [interesting numbers, project distribution, tools, etc.]
 
 ## 🔑 Key Takeaway
-[One personalized paragraph — insightful, motivating, human]
+[One personalized paragraph — insightful, motivating, human. End with their evolution path: "You're a [Current] heading toward [Target]. One change: [specific tip]."]
 
 ---
 *Generated by Introspect 🔍 — Run again in a week to track your growth!*
