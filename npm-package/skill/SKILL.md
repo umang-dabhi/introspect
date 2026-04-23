@@ -55,18 +55,18 @@ Score each parameter using both the raw metrics AND your reading of the session 
 | Param | Raw Data | Your Interpretation |
 |-------|----------|-------------------|
 | 🎯 **Clarity** | prompt length distribution, short/mega counts | Read the actual first messages — are they clear? Would YOU understand what was needed? |
-| 🔄 **Iteration Efficiency** | median turns, repeated prompts | Look at the snippets — were the iterations productive or spinning wheels? |
+| 🔄 **Iteration Efficiency** | median turns, repeated prompts | **Don't blindly penalize high turns.** High turns + high tool usage + deliverable = productive complex session. High turns + high frustration + no deliverable = spinning wheels. Context matters — read the snippets before scoring. |
 | 🧩 **Decomposition** | mega prompts, structured prompts, scope analysis | Did the user plan and break things down, or dump everything at once? |
-| 🏃 **Momentum** | completion rate, last messages | Read the session endings — did they wrap up cleanly or just... stop? |
+| ~~🏃 **Momentum**~~ | ~~completion rate~~ | **REMOVED as graded metric.** Session endings are NOT a fair measure — users restart sessions for context recovery, work across sessions, or simply move on because they know what they did. Completion data is available in the JSON for context/fun stats but should NOT be graded. |
 | 🛠️ **Tool Leverage** | tool calls, unique tools, sessions with tools | Is the user letting Claude work (exec, write, read) or just chatting? |
-| 😤 **Frustration Recovery** | frustration signals, repeated prompts, frustration moments in snippets | READ the frustration moments — did the user pivot strategy or keep hammering? This is where you actually analyze behavior. |
+| 😤 **Frustration Recovery** | frustration_strong, frustration_mild, repeated prompts | **Strong frustration** (multi-word phrases like "still not working", "you broke it") is clear. **Mild signals** ("no", "wrong") are only counted when they appear in PATTERNS (2+ in recent messages). Single "no" = correction, not frustration. Read the actual frustration moments in snippets before scoring. |
 | 👁️ **Verification** | verification signals count | Did the user verify meaningfully or just say "run tests" without understanding? |
-| 💬 **Engagement** | engagement vs blind agreement counts, communication style breakdown | Is the user a thinking partner or a passive consumer? |
+| 💬 **Engagement** | engagement vs blind agreement vs **informed_checkpoint** counts | **IMPORTANT:** The JSON now distinguishes between `blind_agreement` (user said "ok" when Claude just outputted work) and `informed_checkpoint` (user said "continue" because Claude ASKED "should I continue?"). Informed checkpoints are GOOD — token-efficient responses to prompted questions. Only `blind_agreement` indicates passive consumption. |
 | 📊 **Token Efficiency** | tokens per turn, total tokens | Context: high tokens might be fine for complex tasks, wasteful for simple ones |
-| 🧠 **Cognitive Load Management** | files touched, branches, tools per session | Is the user tackling appropriate complexity or drowning? |
+| 🧠 **Cognitive Load Management** | files touched, branches, tools per session | **Context matters:** High file count + single branch + related files = complex but focused work (GOOD). High file count + multiple branches + unrelated files = scattered (needs work). Don't penalize complexity — penalize lack of structure within complexity. |
 | 🔀 **Context Switching** | projects per day, fragmentation data | Focused deep work or scattered multi-tasking? |
-| 🎯 **Goal Clarity** | First messages from snippets | Read the ACTUAL first messages — do they state clear goals? |
-| 📐 **Scope Discipline** | scope analysis, task shifts detected | Did sessions stay on track or scope-creep? |
+| 🎯 **Goal Clarity** | First messages from snippets | Read the ACTUAL first messages. **BUT:** If user has project context (CLAUDE.md), a short first message like "fix the auth bug" IS clear — project context fills the gap. Don't penalize brevity when context already exists. Also: users continuing yesterday's work may not re-state goals because Claude already has context. |
+| 📐 **Scope Discipline** | scope analysis, task shifts detected | **Tightened detection:** "also add error handling" within same task = NOT a scope shift. Only true topic changes count (e.g., auth work → suddenly asking about CSS). "next" as continuation ≠ scope shift. Read the scope_analysis data carefully. |
 
 **Grading Scale:**
 - **S** (90-100): Exceptional. Top-tier. Rare.
@@ -121,6 +121,14 @@ Look for these common developer-AI cognitive patterns:
 Identify 3-5 patterns you ACTUALLY see in the data. Don't make them up. Quote brief examples if possible.
 
 Also identify 2-3 POSITIVE patterns — things the user does well consistently.
+
+**NEW positive patterns to look for:**
+- **"Context Recovery"** — user restarts session to get fresh context. This is SMART, not abandonment. If you see short sessions followed by same-project restarts, call this out as a positive.
+- **"Token Conscious"** — short replies to checkpoints ("continue", "yes proceed") = user is optimizing token spend. If `informed_checkpoint` count is high, this is deliberate efficiency.
+- **"Progressive Delegation"** — user starts directive, then trusts Claude more as session progresses. Look at session journey: if start phase has long detailed prompts and end phase has shorter trusting messages with more tool usage = growing trust.
+
+**NEW mild-concern patterns to look for:**
+- **"Premature Closure Request"** — user asks Claude to commit/push before verifying the work. Speed over safety. Not critical but worth noting gently.
 
 ### 3.4 — Session Journey Map
 
@@ -252,6 +260,19 @@ TIER D (Starting):    🌀 Explorer
 ```
 
 The `archetype_tiers` data in the JSON has the full tier mapping.
+
+**⚠️ IMPORTANT: Avoid confusion between Archetype Tier and Overall Grade!**
+
+These are TWO DIFFERENT things:
+- **Archetype Tier** = which STYLE of developer you are (Director = Tier A style)
+- **Overall Grade** = how well you EXECUTE across all parameters (could be B even with A-tier archetype)
+
+Example: "You're a **Director (A-tier archetype)** — great style for complex work. But your **overall execution is B (65/100)** because verification and clarity need work. The archetype is WHO you are, the grade is HOW WELL you're doing it."
+
+**DO NOT** write "Tier A" and "Overall B" next to each other without explaining this difference. Users WILL be confused. Always clarify:
+- "Your archetype (Director) sits in Tier A — that's a strong collaboration style"
+- "Your overall score is B (65) — that's how effectively you're using that style across all params"
+- "Think of it like: you're driving an A-tier car, but your driving skill is B. The car is great — sharpen the driving."
 
 ## 🚀 How to Level Up — Your Evolution Path
 

@@ -34,12 +34,28 @@ HISTORY_FILE = CLAUDE_DIR / "history.jsonl"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
 
 # Signal keyword lists (used for COUNTING only — Claude interprets meaning)
-FRUSTRATION_SIGNALS = [
-    "no", "wrong", "that's not", "thats not", "not what i", "try again",
-    "still not", "again", "nahi", "galat", "nope", "still wrong",
-    "that doesn't work", "doesnt work", "not working", "broken",
+#
+# IMPORTANT: These are COMPOUND signals where possible. Single words like "no"
+# or "run" have too many false positives. We require either multi-word phrases
+# or combine single words with context checks in the analysis functions.
+
+# Frustration: requires COMPOUND signals — "no" alone is NOT frustration
+# (could be "no, I meant the other file" = correction, not frustration)
+FRUSTRATION_SIGNALS_STRONG = [
+    # Clearly frustrated — no ambiguity
+    "that's not what", "thats not what", "not what i asked", "not what i want",
+    "still not working", "still wrong", "still broken", "still not right",
+    "that doesn't work", "doesnt work", "not working", "this is wrong",
     "why did you", "i said", "i already said", "i told you",
-    "revert", "undo", "go back", "start over", "from scratch"
+    "start over", "from scratch", "completely wrong",
+    "you broke", "you deleted", "you removed", "you changed",
+    "no no no", "stop stop", "what the",
+]
+FRUSTRATION_SIGNALS_MILD = [
+    # Could be frustration OR just correction — needs context
+    "try again", "nahi", "galat", "nope",
+    "revert", "undo", "go back", "wrong",
+    "not right", "that's not", "thats not",
 ]
 
 AGREEMENT_SIGNALS = [
@@ -48,11 +64,30 @@ AGREEMENT_SIGNALS = [
     "ha", "hmm ok", "cool", "agreed", "right", "yup"
 ]
 
+# Checkpoint questions Claude typically asks before user says "continue"
+CHECKPOINT_SIGNALS = [
+    "should i continue", "shall i continue", "want me to continue",
+    "should i proceed", "shall i proceed", "want me to proceed",
+    "do you want me to", "should i go ahead", "shall i go ahead",
+    "want me to go ahead", "ready to", "move on to",
+    "commit and push", "commit first", "push now",
+    "does this look", "look good", "what do you think",
+    "any changes", "anything else", "want to review",
+    "here's what i", "here is what i", "so far i",
+    "i've completed", "i have completed", "done with",
+    "want me to stop", "should i stop", "pause here",
+]
+
+# Verification: tightened — "run" alone is execution, not verification
 VERIFICATION_SIGNALS = [
-    "test", "run", "check", "verify", "does it work", "try it",
-    "show me", "print", "log", "debug", "console", "output",
-    "let me see", "screenshot", "result", "pass", "fail",
-    "did it work", "working?", "status"
+    "run tests", "run the tests", "run test", "does it work",
+    "did it work", "is it working", "check if", "verify that",
+    "try it", "try running", "show me the output", "show me the result",
+    "let me see", "screenshot", "does it pass", "did it pass",
+    "test it", "check the output", "check output", "working?",
+    "does it compile", "any errors", "is it correct",
+    "self review", "self-review", "review it", "re-review",
+    "cross check", "double check", "sanity check",
 ]
 
 ENGAGEMENT_SIGNALS = [
@@ -210,6 +245,25 @@ def parse_session(session_info: dict) -> dict | None:
             if not text:
                 continue
 
+            # Skip slash commands and XML-wrapped commands — these are UI actions,
+            # not real user prompts. /clear, /status, /mcp, etc.
+            # They appear as "<command-name>/clear</command-name>" or just "/clear"
+            text_lower = text.lower().strip()
+            is_command = (
+                text_lower.startswith("<command-") or
+                text_lower.startswith("/clear") or
+                text_lower.startswith("/status") or
+                text_lower.startswith("/mcp") or
+                text_lower.startswith("/help") or
+                text_lower.startswith("/config") or
+                text_lower.startswith("/model") or
+                text_lower.startswith("/compact") or
+                text_lower.startswith("/review") or
+                (text_lower.startswith("/") and len(text_lower) < 30 and " " not in text_lower.strip("/"))
+            )
+            if is_command:
+                continue
+
             user_messages.append({
                 "text": text,
                 "timestamp": ts_dt.isoformat() if ts_dt else None,
@@ -320,10 +374,12 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
     long_prompts = sum(1 for l in prompt_lengths if 200 < l <= 500)
     mega_prompts = sum(1 for l in prompt_lengths if l > 500)
 
-    # Signal counting
-    frustration_count = 0
+    # ─── Signal Counting (with context awareness) ─────────────────────
+    frustration_strong_count = 0
+    frustration_mild_count = 0
     agreement_count = 0
     blind_agreement_count = 0
+    informed_checkpoint_count = 0  # NEW: "continue" in response to Claude's checkpoint
     verification_count = 0
     engagement_count = 0
     directive_count = 0
@@ -331,14 +387,33 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
     exploratory_count = 0
 
     for s in sessions:
-        for msg in s["user_messages"]:
+        assistant_msgs = s.get("assistant_messages", [])
+        for idx, msg in enumerate(s["user_messages"]):
             text = msg["text"]
-            if contains_signal(text, FRUSTRATION_SIGNALS):
-                frustration_count += 1
+
+            # ── Frustration: compound detection ──
+            # Strong = definitely frustrated (multi-word phrases, no ambiguity)
+            if contains_signal(text, FRUSTRATION_SIGNALS_STRONG):
+                frustration_strong_count += 1
+            # Mild = maybe frustrated, maybe just correcting
+            # Only count mild if REPEATED (2+ mild signals in last 3 messages)
+            elif contains_signal(text, FRUSTRATION_SIGNALS_MILD):
+                # Check if previous 2 user msgs also had mild frustration
+                recent_msgs = s["user_messages"][max(0, idx-2):idx]
+                recent_mild = sum(1 for m in recent_msgs if contains_signal(m["text"], FRUSTRATION_SIGNALS_MILD))
+                if recent_mild >= 1:
+                    # Pattern of corrections = likely actual frustration
+                    frustration_mild_count += 1
+
+            # ── Verification: tightened ──
             if contains_signal(text, VERIFICATION_SIGNALS):
                 verification_count += 1
+
+            # ── Engagement ──
             if contains_signal(text, ENGAGEMENT_SIGNALS):
                 engagement_count += 1
+
+            # ── Communication style ──
             if contains_signal(text, DIRECTIVE_SIGNALS):
                 directive_count += 1
             if contains_signal(text, COLLABORATIVE_SIGNALS):
@@ -346,20 +421,48 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
             if contains_signal(text, EXPLORATORY_SIGNALS):
                 exploratory_count += 1
 
-            # Blind agreement = short + agreement signal
+            # ── Agreement: CONTEXTUAL detection (Point A fix) ──
             text_clean = text.lower().strip().rstrip("!.,?")
-            if len(text_clean) <= 40 and contains_signal(text_clean, AGREEMENT_SIGNALS):
-                blind_agreement_count += 1
+            is_short_agree = len(text_clean) <= 40 and contains_signal(text_clean, AGREEMENT_SIGNALS)
+
+            if is_short_agree:
+                # Check if Claude ASKED a checkpoint question in the previous message
+                prev_assistant_text = ""
+                if idx > 0 and idx - 1 < len(assistant_msgs):
+                    prev_assistant_text = assistant_msgs[idx - 1].get("text", "").lower()
+
+                if contains_signal(prev_assistant_text, CHECKPOINT_SIGNALS):
+                    # User replied to Claude's checkpoint = INFORMED, token-efficient
+                    informed_checkpoint_count += 1
+                else:
+                    # Claude just outputted work, user said "ok" without context = blind
+                    blind_agreement_count += 1
             elif contains_signal(text, AGREEMENT_SIGNALS):
                 agreement_count += 1
 
-    # Structured prompts (bullet points, numbered lists)
+    # Total frustration = strong + counted mild (mild already filtered above)
+    frustration_count = frustration_strong_count + frustration_mild_count
+
+    # ── Structured & mega prompt analysis (improved) ──
     structured_prompts = 0
+    structured_mega_prompts = 0  # NEW: mega but well-structured = GOOD
+    unstructured_mega_prompts = 0  # Mega wall of text = needs work
     for s in sessions:
         for msg in s["user_messages"]:
             text = msg["text"]
-            if any(m in text for m in ["\n-", "\n*", "\n1.", "\n2.", "step 1", "step 2", "first,", "then,"]):
+            has_structure = any(m in text for m in [
+                "\n-", "\n*", "\n1.", "\n2.", "\n3.",
+                "step 1", "step 2", "first,", "then,",
+                "\n- ", "\n• ", "\n> ",
+            ])
+            if has_structure:
                 structured_prompts += 1
+            # Classify mega prompts
+            if len(text) > 500:
+                if has_structure:
+                    structured_mega_prompts += 1
+                else:
+                    unstructured_mega_prompts += 1
 
     # Tool usage distribution
     tool_counter = Counter()
@@ -431,7 +534,7 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
                 pass
 
         # Also natural if session had decent length and low frustration at end
-        last_frustrations = sum(1 for m in last_msgs if contains_signal(m["text"], FRUSTRATION_SIGNALS))
+        last_frustrations = sum(1 for m in last_msgs if contains_signal(m["text"], FRUSTRATION_SIGNALS_STRONG) or contains_signal(m["text"], FRUSTRATION_SIGNALS_MILD))
         if s["turn_count"] >= 5 and last_frustrations == 0:
             is_natural_pause = True
 
@@ -443,17 +546,30 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
         abandoned_count += 1
 
     # Repeated prompts (similar consecutive messages)
+    # Repeated prompts detection (tightened)
+    # Filter out common stopwords to reduce false positives
+    STOPWORDS = {
+        "the", "a", "an", "is", "are", "was", "were", "be", "been",
+        "this", "that", "it", "and", "or", "but", "in", "on", "at",
+        "to", "for", "of", "with", "from", "by", "as", "do", "does",
+        "did", "not", "no", "yes", "can", "will", "should", "would",
+        "could", "have", "has", "had", "i", "you", "we", "me", "my",
+        "your", "please", "also", "just", "so", "if", "then", "now",
+        "like", "want", "need", "make", "let", "ok", "okay",
+    }
     repeated_prompts = 0
     for s in sessions:
         prev = ""
         for msg in s["user_messages"]:
             text = msg["text"]
-            if prev and len(text) > 20:
-                words_prev = set(prev.lower().split())
-                words_curr = set(text.lower().split())
-                if words_prev and words_curr:
+            if prev and len(text) > 30 and len(prev) > 30:
+                # Use meaningful words only (filter stopwords)
+                words_prev = set(prev.lower().split()) - STOPWORDS
+                words_curr = set(text.lower().split()) - STOPWORDS
+                if len(words_prev) >= 3 and len(words_curr) >= 3:
                     overlap = len(words_prev & words_curr) / max(len(words_prev), len(words_curr))
-                    if overlap > 0.6:
+                    # Require 70% overlap on MEANINGFUL words (stricter)
+                    if overlap > 0.7:
                         repeated_prompts += 1
             prev = text
 
@@ -486,13 +602,18 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
             "medium_30_200": medium_prompts,
             "long_200_500": long_prompts,
             "mega_over_500": mega_prompts,
+            "mega_structured": structured_mega_prompts,
+            "mega_unstructured": unstructured_mega_prompts,
             "structured": structured_prompts,
             "total": len(prompt_lengths),
             "avg_length": round(sum(prompt_lengths) / max(len(prompt_lengths), 1)),
         },
         "signals": {
-            "frustration": frustration_count,
+            "frustration_total": frustration_count,
+            "frustration_strong": frustration_strong_count,
+            "frustration_mild": frustration_mild_count,
             "blind_agreement": blind_agreement_count,
+            "informed_checkpoint": informed_checkpoint_count,
             "informed_agreement": agreement_count,
             "verification": verification_count,
             "engagement": engagement_count,
@@ -503,7 +624,8 @@ def compute_raw_metrics(sessions: list[dict]) -> dict:
             "collaborative": collaborative_count,
             "exploratory": exploratory_count,
             "passive_blind": blind_agreement_count,
-            "total_classified": directive_count + collaborative_count + exploratory_count + blind_agreement_count,
+            "informed_checkpoint": informed_checkpoint_count,
+            "total_classified": directive_count + collaborative_count + exploratory_count + blind_agreement_count + informed_checkpoint_count,
         },
         "tool_usage": {
             "total_calls": total_tool_calls,
@@ -668,14 +790,17 @@ def compute_session_journey(sessions: list[dict]) -> list[dict]:
             if not phase_msgs:
                 return {}
             avg_len = sum(m["char_count"] for m in phase_msgs) / len(phase_msgs)
-            frustrations = sum(1 for m in phase_msgs if contains_signal(m["text"], FRUSTRATION_SIGNALS))
+            frustrations = sum(1 for m in phase_msgs if (
+                contains_signal(m["text"], FRUSTRATION_SIGNALS_STRONG) or
+                contains_signal(m["text"], FRUSTRATION_SIGNALS_MILD)
+            ))
             agreements = sum(1 for m in phase_msgs if len(m["text"].strip()) <= 40 and contains_signal(m["text"], AGREEMENT_SIGNALS))
             verifications = sum(1 for m in phase_msgs if contains_signal(m["text"], VERIFICATION_SIGNALS))
             return {
                 "msg_count": len(phase_msgs),
                 "avg_char_length": round(avg_len),
                 "frustration_signals": frustrations,
-                "blind_agreements": agreements,
+                "short_agreements": agreements,
                 "verification_signals": verifications,
             }
 
@@ -728,7 +853,7 @@ def extract_session_snippets(sessions: list[dict], max_snippets: int = 8) -> lis
         # Frustration moments (full context)
         frustration_moments = []
         for i, msg in enumerate(s["user_messages"]):
-            if contains_signal(msg["text"], FRUSTRATION_SIGNALS):
+            if contains_signal(msg["text"], FRUSTRATION_SIGNALS_STRONG) or contains_signal(msg["text"], FRUSTRATION_SIGNALS_MILD):
                 context = {
                     "user_msg": msg["text"][:400],
                     "position": f"turn {i + 1}/{s['user_msg_count']}",
@@ -760,7 +885,7 @@ def extract_session_snippets(sessions: list[dict], max_snippets: int = 8) -> lis
     # Strategy: pick diverse sessions
     sorted_by_turns = sorted(sessions, key=lambda s: s["turn_count"], reverse=True)
     sorted_by_frustration = sorted(sessions, key=lambda s: sum(
-        1 for m in s["user_messages"] if contains_signal(m["text"], FRUSTRATION_SIGNALS)
+        1 for m in s["user_messages"] if contains_signal(m["text"], FRUSTRATION_SIGNALS_STRONG) or contains_signal(m["text"], FRUSTRATION_SIGNALS_MILD)
     ), reverse=True)
 
     # Longest session (most data)
@@ -805,17 +930,30 @@ def compute_scope_analysis(sessions: list[dict]) -> list[dict]:
         first_msg = s["user_messages"][0]["text"][:500]
         branches_used = s.get("git_branches", [])
 
-        # Count how many distinct "tasks" appear (heuristic: messages with action verbs after the first)
+        # Count REAL topic shifts — not just "also" or "next" within same task
+        # "also add error handling" = same task extension (NOT a shift)
+        # "btw, can you also check the CSS" = different topic (IS a shift)
         task_shifts = 0
+        # Strong shift signals — clearly changing topic
+        strong_shift_phrases = [
+            "different thing", "new task", "switch to", "let's move to",
+            "unrelated but", "separate thing", "another topic",
+            "btw", "by the way", "while you're at it", "aur ek",
+            "one more thing", "oh also",
+        ]
+        # Weak signals — only count if message is about a DIFFERENT subject
+        # (we can't detect subject change perfectly, so we check if the msg
+        # introduces NEW action verbs on likely different areas)
         for i, msg in enumerate(s["user_messages"][1:], 1):
             text = msg["text"].lower()
-            # New task indicators
-            if any(phrase in text for phrase in [
-                "also", "one more", "another thing", "next", "now do",
-                "switch to", "let's move", "different thing", "new task",
-                "btw", "by the way", "while you're at it", "aur ek",
-            ]):
+            # Strong signals — always count
+            if any(phrase in text for phrase in strong_shift_phrases):
                 task_shifts += 1
+            # "now do X" / "next do X" only count if msg is long enough
+            # to likely be a new task (not just "next" as continuation)
+            elif any(phrase in text for phrase in ["now do", "now let's", "now create", "now fix"]):
+                if len(text) > 60:  # Substantive enough to be a real new task
+                    task_shifts += 1
 
         scope_data.append({
             "session_id": s["session_id"][:8],
@@ -1055,18 +1193,24 @@ def compute_dreyfus_and_tiers(raw_metrics: dict) -> dict:
     elif verify_rate > 5: param_scores["verification"] = 55
     else: param_scores["verification"] = 35
 
-    # Engagement
+    # Engagement — informed checkpoints are GOOD, not blind
     engage_rate = signals["engagement"] / total_msgs * 100
     blind_rate = signals["blind_agreement"] / total_msgs * 100
-    param_scores["engagement"] = min(100, max(0, int(50 + engage_rate * 1.5 - blind_rate * 0.8)))
+    checkpoint_rate = signals.get("informed_checkpoint", 0) / total_msgs * 100
+    # Informed checkpoints BOOST engagement (user is responsive to Claude's questions)
+    param_scores["engagement"] = min(100, max(0, int(50 + engage_rate * 1.5 - blind_rate * 0.8 + checkpoint_rate * 0.5)))
 
-    # Frustration recovery
-    frust_rate = signals["frustration"] / total_msgs * 100
+    # Frustration recovery — only count STRONG frustration heavily
+    strong_frust_rate = signals["frustration_strong"] / total_msgs * 100
+    mild_frust_rate = signals["frustration_mild"] / total_msgs * 100
     repeat_rate = signals["repeated_prompts"] / total_msgs * 100
-    param_scores["frustration_recovery"] = min(100, max(0, int(85 - frust_rate * 2 - repeat_rate * 3)))
+    # Strong frustration penalizes more, mild is lighter
+    # Repeats penalty capped — some repetition is natural in long sessions
+    capped_repeat_rate = min(repeat_rate, 20)  # Cap at 20% impact
+    param_scores["frustration_recovery"] = min(100, max(0, int(85 - strong_frust_rate * 3 - mild_frust_rate * 1 - capped_repeat_rate * 1.5)))
 
-    # Momentum (using healthy_rate instead of old completion_rate)
-    param_scores["momentum"] = min(100, int(completion["healthy_rate"]))
+    # NOTE: Momentum REMOVED as graded metric — completion data stays in JSON
+    # for context/fun stats but doesn't affect overall score
 
     # Token efficiency
     tpt = per_session["tokens_per_turn"]
@@ -1076,10 +1220,14 @@ def compute_dreyfus_and_tiers(raw_metrics: dict) -> dict:
     elif tpt < 60000: param_scores["token_efficiency"] = 50
     else: param_scores["token_efficiency"] = 35
 
-    # Decomposition
-    mega_ratio = prompts["mega_over_500"] / max(prompts["total"], 1)
+    # Decomposition — structured mega prompts are GOOD, unstructured are bad
+    unstructured_mega_ratio = prompts.get("mega_unstructured", 0) / max(prompts["total"], 1)
+    structured_mega_ratio = prompts.get("mega_structured", 0) / max(prompts["total"], 1)
     struct_ratio = prompts["structured"] / max(prompts["total"], 1)
-    param_scores["decomposition"] = min(100, max(0, int(70 - mega_ratio * 50 + struct_ratio * 40)))
+    # Penalize only UNSTRUCTURED mega prompts; reward structured ones
+    param_scores["decomposition"] = min(100, max(0, int(
+        70 - unstructured_mega_ratio * 60 + structured_mega_ratio * 20 + struct_ratio * 40
+    )))
 
     # Map scores to Dreyfus levels
     def score_to_dreyfus(score: int) -> dict:
@@ -1098,10 +1246,10 @@ def compute_dreyfus_and_tiers(raw_metrics: dict) -> dict:
 
     dreyfus_map = {param: score_to_dreyfus(score) for param, score in param_scores.items()}
 
-    # Overall score
+    # Overall score (momentum removed — not a fair graded metric)
     weights = {
         "clarity": 1.5, "iteration": 1.2, "decomposition": 1.0,
-        "momentum": 1.3, "tool_leverage": 0.8, "frustration_recovery": 1.0,
+        "tool_leverage": 0.8, "frustration_recovery": 1.0,
         "verification": 1.2, "engagement": 1.0, "token_efficiency": 0.8,
     }
     total_weight = sum(weights.values())
