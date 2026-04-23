@@ -1,0 +1,9 @@
+reports/
+.clawhub/
+_meta.json
+__pycache__/
+*.pyc
+.npmrc
+.env
+*.tgz
+node_modules/
