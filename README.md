@@ -79,6 +79,12 @@ npx @umang-boss/introspect
 
 The installer checks prerequisites, copies the skill to `~/.claude/skills/introspect`, and you're ready to go.
 
+**Keep it updated:**
+```bash
+npx @umang-boss/introspect update    # Update to latest
+npx @umang-boss/introspect check     # Check installed vs latest version
+```
+
 [![npm version](https://img.shields.io/npm/v/@umang-boss/introspect.svg)](https://www.npmjs.com/package/@umang-boss/introspect)
 
 ### Option 2: ClawHub
@@ -138,6 +144,15 @@ python3 ~/.claude/skills/introspect/scripts/analyze.py --days 7 --sessions 10 --
 | `--sessions` | 10 | Number of sessions to analyze (max 50) |
 | `--project` | all | Project filter (substring match) |
 | `--output` | `~/.claude/skills/introspect/reports/` | Output directory |
+
+## What's New in v1.1.0
+
+- 🧬 **Dreyfus Skill Model** — per-parameter placement from Novice → Expert
+- 🏆 **Archetype Tier Ranking** — S/A/B/C/D tiers for all 10 archetypes
+- 🚀 **"How to Level Up" Section** — 75-85% personalized tips from YOUR sessions + evolution roadmap
+- 📐 **Smart Completion Detection** — 4 categories (completed / paused / continued / abandoned) instead of binary
+- 🔄 **npm update/check commands** — `npx @umang-boss/introspect update`
+- 🔧 **Bug fixes** — project name detection now dynamic (works on any system)
 
 ## Requirements
 
